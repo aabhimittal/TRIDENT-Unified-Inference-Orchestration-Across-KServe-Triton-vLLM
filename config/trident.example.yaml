@@ -1,0 +1,101 @@
+# TRIDENT example configuration.
+#
+# Three backends, three engines:
+#  - a vLLM server for LLM chat/completions
+#  - a Triton server for CV tensor models and ensembles
+#  - a KServe InferenceService hosting an embedding predictor (V2 protocol)
+
+slo_classes:
+  interactive:            # user-facing chat: tight budget, high priority
+    target_p95_ms: 1500
+    priority: 10
+  realtime:               # CV pipelines on live streams
+    target_p95_ms: 200
+    priority: 20
+  batch:                  # offline jobs: throughput over latency
+    target_p95_ms: 30000
+    priority: 1
+  default:
+    target_p95_ms: 2000
+    priority: 5
+
+routing:
+  weights:                # utility terms; see trident/scoring.py
+    latency: 0.45
+    affinity: 0.25
+    headroom: 0.20
+    bias: 0.10
+  max_attempts: 2         # failover to the next-ranked backend once
+  default_latency_ms: 250 # prior before observations exist
+  breaker_failure_threshold: 5
+  breaker_reset_seconds: 30
+
+  # Canary: send 10% of llama-3-8b traffic to the TensorRT-LLM build on Triton.
+  canary:
+    - model: llama-3-8b
+      stable: vllm-llama
+      candidate: triton-trtllm
+      weight: 0.10
+
+  # Shadow: mirror 20% of resnet50 traffic to the KServe-managed copy.
+  shadow:
+    - model: resnet50
+      target: kserve-resnet
+      sample: 0.20
+
+telemetry:
+  poll_interval_seconds: 5
+  request_timeout_seconds: 120
+
+backends:
+  - name: vllm-llama
+    kind: vllm
+    base_url: http://vllm-llama.serving.svc.cluster.local:8000
+    metrics_url: http://vllm-llama.serving.svc.cluster.local:8000/metrics
+    max_concurrency: 64
+    models:
+      - name: llama-3-8b
+        upstream_name: meta-llama/Meta-Llama-3-8B-Instruct
+        workloads: [llm_chat, llm_completion]
+
+  - name: triton-trtllm
+    kind: triton
+    base_url: http://triton-trtllm.serving.svc.cluster.local:8000
+    metrics_url: http://triton-trtllm.serving.svc.cluster.local:8002/metrics
+    max_concurrency: 32
+    models:
+      - name: llama-3-8b
+        upstream_name: llama3_8b_trtllm
+        workloads: [llm_completion]
+
+  - name: triton-cv
+    kind: triton
+    base_url: http://triton-cv.serving.svc.cluster.local:8000
+    metrics_url: http://triton-cv.serving.svc.cluster.local:8002/metrics
+    max_concurrency: 48
+    models:
+      - name: resnet50
+        workloads: [tensor]
+      - name: detection_pipeline
+        workloads: [ensemble]
+
+  - name: kserve-resnet
+    kind: kserve
+    protocol: v2
+    base_url: http://resnet.serving.svc.cluster.local
+    max_concurrency: 16
+    models:
+      - name: resnet50
+        workloads: [tensor]
+
+  - name: kserve-embed
+    kind: kserve
+    protocol: openai      # vLLM ServingRuntime behind KServe
+    base_url: http://embedder.serving.svc.cluster.local
+    max_concurrency: 32
+    affinity:             # this InferenceService runs vLLM, so boost LLM affinity
+      embedding: 0.9
+    models:
+      - name: bge-large
+        upstream_name: BAAI/bge-large-en-v1.5
+        workloads: [embedding]

@@ -1,0 +1,41 @@
+# KServe-managed backends: the Kubernetes-native lifecycle layer
+# (canary rollout, scale-to-zero, revision management) for predictors
+# that benefit from it.
+---
+# A Triton-runtime InferenceService for resnet50 — KServe manages the
+# lifecycle, Triton does the serving. TRIDENT shadows traffic here
+# (see the `shadow` rule in config/trident.example.yaml).
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: resnet
+  namespace: serving
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: triton
+      protocolVersion: v2
+      storageUri: s3://models/resnet50
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+---
+# A vLLM ServingRuntime InferenceService for embeddings — speaks the
+# OpenAI protocol, declared in TRIDENT config with `protocol: openai`.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: embedder
+  namespace: serving
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: huggingface
+      args:
+        - --model_name=BAAI/bge-large-en-v1.5
+        - --backend=vllm
+      resources:
+        limits:
+          nvidia.com/gpu: 1
