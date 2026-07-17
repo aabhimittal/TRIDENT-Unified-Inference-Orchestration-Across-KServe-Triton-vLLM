@@ -1,0 +1,46 @@
+# Raw vLLM deployment (no KServe) — the LLM throughput workhorse.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama
+  namespace: serving
+  labels: { app: vllm-llama }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vllm-llama }
+  template:
+    metadata:
+      labels: { app: vllm-llama }
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.9.1
+          args:
+            - --model=meta-llama/Meta-Llama-3-8B-Instruct
+            - --max-model-len=8192
+            - --gpu-memory-utilization=0.92
+          ports:
+            - containerPort: 8000
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token }
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-llama
+  namespace: serving
+spec:
+  selector: { app: vllm-llama }
+  ports:
+    - port: 8000
+      targetPort: 8000

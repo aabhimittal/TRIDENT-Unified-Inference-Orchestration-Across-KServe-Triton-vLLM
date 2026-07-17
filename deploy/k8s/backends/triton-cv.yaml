@@ -1,0 +1,48 @@
+# Raw Triton deployment — CV/tensor/ensemble workhorse (TensorRT engines).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-cv
+  namespace: serving
+  labels: { app: triton-cv }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: triton-cv }
+  template:
+    metadata:
+      labels: { app: triton-cv }
+    spec:
+      containers:
+        - name: triton
+          image: nvcr.io/nvidia/tritonserver:24.05-py3
+          args:
+            - tritonserver
+            - --model-repository=s3://models/triton-cv
+            - --strict-model-config=false
+          ports:
+            - containerPort: 8000  # HTTP
+            - containerPort: 8001  # gRPC
+            - containerPort: 8002  # metrics
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet: { path: /v2/health/ready, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-cv
+  namespace: serving
+spec:
+  selector: { app: triton-cv }
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: metrics
+      port: 8002
+      targetPort: 8002

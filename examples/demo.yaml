@@ -1,0 +1,26 @@
+# Demo config pointing at the mock backends from examples/mock_backends.py.
+slo_classes:
+  interactive: { target_p95_ms: 800, priority: 10 }
+  default: { target_p95_ms: 2000, priority: 5 }
+
+telemetry:
+  poll_interval_seconds: 2
+
+backends:
+  - name: mock-vllm
+    kind: vllm
+    base_url: http://localhost:8001
+    metrics_url: http://localhost:8001/metrics
+    max_concurrency: 16
+    models:
+      - name: llama-3-8b
+        workloads: [llm_chat, llm_completion]
+
+  - name: mock-triton
+    kind: triton
+    base_url: http://localhost:8002
+    metrics_url: http://localhost:8002/metrics
+    max_concurrency: 16
+    models:
+      - name: resnet50
+        workloads: [tensor]
