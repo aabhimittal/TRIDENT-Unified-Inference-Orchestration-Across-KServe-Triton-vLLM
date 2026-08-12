@@ -10,6 +10,7 @@ latencies back after every dispatch. Scoring reads this state lock-free.
 from __future__ import annotations
 
 import enum
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -91,18 +92,22 @@ class BackendStats:
     """Mutable runtime state for one backend, read by the scorer."""
 
     latency_ms: EWMA = field(default_factory=EWMA)
+    tokens_in: EWMA = field(default_factory=EWMA)  # avg input tokens per LLM request
     inflight: int = 0
     queue_depth: float = 0.0
     utilization: float = 0.0  # 0..1; KV-cache usage for vLLM, GPU util for Triton
     healthy: bool = True
+    draining: bool = False  # operator-initiated: finish inflight, take no new work
     total_requests: int = 0
     total_failures: int = 0
     breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
 
-    def record_result(self, latency_ms: float, ok: bool) -> None:
+    def record_result(self, latency_ms: float, ok: bool, tokens: int | None = None) -> None:
         self.total_requests += 1
         if ok:
             self.latency_ms.update(latency_ms)
+            if tokens is not None and tokens > 0:
+                self.tokens_in.update(tokens)
             self.breaker.record_success()
         else:
             self.total_failures += 1
@@ -111,10 +116,12 @@ class BackendStats:
     def snapshot(self) -> dict:
         return {
             "ewma_latency_ms": round(self.latency_ms.value, 2) if self.latency_ms.value else None,
+            "ewma_tokens_in": round(self.tokens_in.value, 1) if self.tokens_in.value else None,
             "inflight": self.inflight,
             "queue_depth": self.queue_depth,
             "utilization": round(self.utilization, 4),
             "healthy": self.healthy,
+            "draining": self.draining,
             "breaker": self.breaker.state.value,
             "total_requests": self.total_requests,
             "total_failures": self.total_failures,
@@ -129,13 +136,19 @@ def parse_prometheus(text: str) -> dict[str, list[tuple[dict[str, str], float]]]
         if not line or line.startswith("#"):
             continue
         try:
-            metric_part, value_part = line.rsplit(None, 1)
-            # A timestamp may follow the value; rsplit again if value isn't numeric.
-            try:
-                value = float(value_part)
-            except ValueError:
-                metric_part, value_part = metric_part.rsplit(None, 1)
-                value = float(value_part)
+            # Exposition format: `name[{labels}] value [timestamp]`. Split off
+            # the metric part first (label values may contain spaces), then the
+            # value is the FIRST remaining token — never the trailing timestamp.
+            if "{" in line:
+                brace_end = line.index("}", line.index("{"))
+                metric_part, rest = line[: brace_end + 1], line[brace_end + 1 :]
+            else:
+                metric_part, _, rest = line.partition(" ")
+            value = float(rest.split()[0])
+            # NaN/Inf are legal in the exposition format but would poison the
+            # sums and averages we feed into scoring — drop those samples.
+            if not math.isfinite(value):
+                continue
             if "{" in metric_part:
                 name, label_blob = metric_part.split("{", 1)
                 label_blob = label_blob.rstrip("}")
@@ -146,16 +159,24 @@ def parse_prometheus(text: str) -> dict[str, list[tuple[dict[str, str], float]]]
             else:
                 name, labels = metric_part, {}
             out.setdefault(name.strip(), []).append((labels, value))
-        except ValueError:
+        except (ValueError, IndexError):
             continue
     return out
 
 
 def _split_labels(blob: str) -> list[str]:
-    """Split label pairs on commas that are outside quoted values."""
-    parts, buf, in_quotes = [], [], False
+    """Split label pairs on commas that are outside quoted values.
+
+    Handles backslash-escaped quotes inside label values (legal in the
+    exposition format: model="he said \\"hi\\"").
+    """
+    parts, buf, in_quotes, escaped = [], [], False, False
     for ch in blob:
-        if ch == '"':
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
             in_quotes = not in_quotes
         if ch == "," and not in_quotes:
             parts.append("".join(buf))

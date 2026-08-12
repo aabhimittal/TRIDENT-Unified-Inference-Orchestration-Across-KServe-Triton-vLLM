@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trident-router"
-version = "0.1.0"
+version = "0.2.0"
 description = "TRIDENT: unified, SLO-aware inference orchestration across KServe, NVIDIA Triton, and vLLM"
 readme = "README.md"
 license = { text = "MIT" }
