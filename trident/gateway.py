@@ -237,7 +237,7 @@ class Dispatcher:
             metrics.SHADOWS.labels(
                 backend=backend_name, status="ok" if resp.ok else str(resp.status_code)
             ).inc()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — shadow is fire-and-forget; nothing may propagate
             metrics.SHADOWS.labels(backend=backend_name, status="error").inc()
             log.debug("shadow to %s failed: %s", backend_name, exc)
 

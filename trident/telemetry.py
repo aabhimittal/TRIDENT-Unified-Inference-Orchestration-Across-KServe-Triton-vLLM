@@ -197,7 +197,7 @@ def _sum_family(families: dict, *names: str) -> float | None:
 
 def _avg_family(families: dict, *names: str) -> float | None:
     for name in names:
-        if name in families and families[name]:
+        if families.get(name):
             vals = [v for _, v in families[name]]
             return sum(vals) / len(vals)
     return None

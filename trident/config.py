@@ -72,7 +72,7 @@ class BackendConfig(BaseModel):
         return v.rstrip("/") if v else v
 
     @model_validator(mode="after")
-    def _default_protocol(self) -> "BackendConfig":
+    def _default_protocol(self) -> BackendConfig:
         if self.protocol is None:
             self.protocol = (
                 Protocol.OPENAI if self.kind == BackendKind.VLLM else Protocol.KSERVE_V2
@@ -190,7 +190,7 @@ class TridentConfig(BaseModel):
     backends: list[BackendConfig]
 
     @model_validator(mode="after")
-    def _validate_references(self) -> "TridentConfig":
+    def _validate_references(self) -> TridentConfig:
         names = {b.name for b in self.backends}
         if len(names) != len(self.backends):
             raise ValueError("backend names must be unique")
@@ -207,6 +207,6 @@ class TridentConfig(BaseModel):
 
 
 def load_config(path: str | Path) -> TridentConfig:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     return TridentConfig.model_validate(raw)
