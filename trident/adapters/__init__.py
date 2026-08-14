@@ -1,14 +1,13 @@
 """Protocol adapters translating TRIDENT's unified request onto each engine's wire API."""
 
+from ..config import BackendConfig
+from ..model import BackendKind
 from .base import BaseAdapter
 from .kserve import KServeAdapter
 from .triton import TritonAdapter
 from .vllm import VLLMAdapter
 
-from ..config import BackendConfig
-from ..model import BackendKind
-
-__all__ = ["BaseAdapter", "VLLMAdapter", "TritonAdapter", "KServeAdapter", "build_adapter"]
+__all__ = ["BaseAdapter", "KServeAdapter", "TritonAdapter", "VLLMAdapter", "build_adapter"]
 
 
 def build_adapter(cfg: BackendConfig, client) -> BaseAdapter:

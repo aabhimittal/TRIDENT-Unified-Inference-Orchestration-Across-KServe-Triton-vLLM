@@ -45,13 +45,20 @@ score = w_lat · latency_fit + w_aff · affinity + w_head · headroom + w_bias �
 
 The interplay is the point: with a relaxed `batch` SLO, affinity keeps chat on vLLM even when it's slow; under a tight `interactive` SLO, the same overloaded vLLM loses to a TensorRT-LLM copy on Triton that answers in 300 ms. Clients pick their budget with one header: `x-trident-slo: interactive`.
 
+The prediction is also **token-aware**: for LLM traffic the router estimates the request's input tokens (~4 chars/token) and scales the backend's latency EWMA by this request's size relative to the backend's average — a 32k-token prompt is not predicted at the latency of the 500-token chats that trained the EWMA (ratio clamped so outliers can't explode the estimate).
+
 On top of scoring:
 
 - **Failover** — if the top backend connection-errors or 5xxes, the request retries down the ranking (`routing.max_attempts`).
-- **Circuit breakers** — consecutive failures open the breaker; after a cooldown a single half-open probe is admitted.
+- **Hedged requests** — for SLO classes that opt in, if the primary hasn't answered within `delay_factor ×` its own predicted latency, the runner-up backend races it with a duplicate request; first success wins and the loser is cancelled. Classic tail-latency insurance at the cost of one duplicate on the slowest tail. Streams never hedge (two token streams can't be merged).
+- **Priority load shedding** — when *every* capable backend is saturated (`inflight ≥ threshold × max_concurrency`), requests below the priority cutoff get an immediate `429` + `Retry-After` instead of queueing in front of interactive traffic. One saturated backend is a routing problem; only full saturation sheds.
+- **Session affinity** — requests carrying the same `x-trident-session` key stay pinned to their backend while it remains competitive (within `min_score_ratio` of the best), so vLLM prefix caching and warm KV state actually get hits. Pins yield to drains, breaker trips, and real degradation, and the session map is TTL + LRU bounded.
+- **Deadline propagation** — `x-trident-deadline-ms` caps the *total* budget including failover; remaining budget becomes the per-attempt HTTP timeout, and exhaustion returns `504` rather than starting a doomed retry.
+- **Circuit breakers** — consecutive failures open the breaker; after a cooldown exactly one half-open probe is admitted (concurrent requests fail over instead of stampeding the recovering backend).
+- **Draining** — `POST /admin/backends/{name}/drain` stops new traffic (inflight finishes naturally) for maintenance or model swaps; `/undrain` restores it. Session pins re-home automatically.
 - **Canary** — deterministic traffic splits per model (`10% of llama-3-8b to the TRT-LLM build`), applied only across backends that passed health/breaker filters.
 - **Shadow** — mirror a sample of a model's traffic to another backend, fire-and-forget, for validating a new deployment against production traffic.
-- **Telemetry poller** — health checks (`/health`, `/v2/health/ready`) and Prometheus scrapes run off the request path; the scorer reads state lock-free.
+- **Telemetry poller** — health checks (`/health`, `/v2/health/ready`) and Prometheus scrapes run off the request path; the scorer reads state lock-free. The scrape parser tolerates hostile payloads: NaN/Inf samples are dropped, out-of-range gauges clamped, timestamps and escaped label values handled.
 
 ## API surface
 
@@ -65,10 +72,19 @@ One gateway, three protocol dialects — clients keep whatever they already spea
 | `POST /v2/models/{m}/infer` | KServe V2 / Triton native | `tensor`, `ensemble` |
 | `POST /v1/models/{m}:predict` | KServe V1 | `tensor` |
 | `GET /metrics` | Prometheus | router observability |
-| `GET /admin/backends` | JSON | live backend state (EWMA, breaker, utilization) |
+| `GET /admin/backends` | JSON | live backend state (EWMA, breaker, utilization, draining) |
 | `GET /admin/models` | JSON | model → backends map |
+| `POST /admin/backends/{name}/drain` / `/undrain` | JSON | maintenance mode per backend |
 
-Responses carry `x-trident-backend`, `x-trident-workload`, and `x-trident-latency-ms` headers so you can always see where a request landed and why.
+Request headers the router understands:
+
+| Header | Effect |
+|---|---|
+| `x-trident-slo` | SLO class: latency budget, shed priority, hedging opt-in |
+| `x-trident-session` | affinity key — sticky routing for KV/prefix-cache reuse |
+| `x-trident-deadline-ms` | total latency budget incl. failover; `504` when exhausted |
+
+Responses carry `x-trident-backend`, `x-trident-workload`, and `x-trident-latency-ms` headers so you can always see where a request landed and why. Shed requests return `429` with `Retry-After`.
 
 ## Quickstart (no GPUs needed)
 
@@ -155,22 +171,23 @@ trident/
   poller.py       # background health + metrics scraping loop
   registry.py     # backend runtime state (config + stats + adapter)
   adapters/       # protocol translation: vllm (OpenAI), triton (V2), kserve (V1/V2/OpenAI)
+  tokens.py       # cheap input-token estimation for LLM workloads
   config.py       # pydantic schema for the YAML config
   metrics.py      # TRIDENT's own Prometheus metrics
 deploy/k8s/       # reference Kubernetes manifests
 examples/         # GPU-free demo (mock backends + demo config)
-tests/            # 52 tests: scoring, routing, breakers, adapters, e2e gateway
+tests/            # 83 tests incl. industrial edge cases (overload storms, breaker
+                  # thundering herds, hostile telemetry, malformed payloads)
 ```
 
 ## Status & roadmap
 
-Working: unified gateway, SLO-aware scoring, telemetry-driven dispatch, failover, circuit breaking, canary, shadow, Prometheus observability, K8s manifests.
+Working: unified gateway, SLO-aware + token-aware scoring, telemetry-driven dispatch, failover, hedged requests, priority load shedding, session/prefix-cache affinity, deadline propagation, circuit breaking, draining, canary, shadow, Prometheus observability, K8s manifests.
 
 Planned:
 
 - gRPC ingress (Triton clients that speak gRPC today)
-- Priority-based preemption/queueing when all backends are saturated (the `priority` field is scored but not yet a queue discipline)
-- Token-aware LLM cost prediction (prompt length → latency estimate, not just EWMA)
+- Cross-replica session affinity (shared session store) for multi-replica TRIDENT deployments
 - KServe controller integration: watch InferenceService status instead of polling
 - Autoscaling hints: export queue-pressure signals per backend as KEDA/HPA metrics
 

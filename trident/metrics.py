@@ -29,6 +29,18 @@ SHADOWS = Counter(
     ["backend", "status"],
 )
 
+HEDGES = Counter(
+    "trident_hedge_requests_total",
+    "Hedged (backup) requests, by hedge-target backend and outcome",
+    ["backend", "outcome"],  # outcome: fired, hedge_won, primary_won
+)
+
+SHED = Counter(
+    "trident_shed_requests_total",
+    "Requests rejected by priority admission control, by SLO class",
+    ["slo_class"],
+)
+
 BACKEND_HEALTH = Gauge(
     "trident_backend_healthy",
     "1 if the backend passed its last health check",

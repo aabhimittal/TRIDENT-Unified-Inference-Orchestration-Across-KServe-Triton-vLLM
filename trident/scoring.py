@@ -56,9 +56,25 @@ def affinity_for(cfg: BackendConfig, workload: WorkloadType) -> float:
     return DEFAULT_AFFINITY[cfg.kind].get(workload, 0.3)
 
 
-def predict_latency_ms(cfg: BackendConfig, stats: BackendStats, default_ms: float) -> float:
-    """Predict request latency from the EWMA, inflated by live pressure."""
+def predict_latency_ms(
+    cfg: BackendConfig,
+    stats: BackendStats,
+    default_ms: float,
+    *,
+    est_tokens: int | None = None,
+) -> float:
+    """Predict request latency from the EWMA, inflated by live pressure.
+
+    For LLM traffic with a token estimate, the EWMA (which reflects the
+    backend's *average* request size) is scaled by this request's size
+    relative to that average — a 32k-token prompt should not be predicted
+    at the latency of the 500-token chats that trained the EWMA. The ratio
+    is clamped so one outlier can't produce absurd predictions.
+    """
     base = stats.latency_ms.value if stats.latency_ms.value is not None else default_ms
+    if est_tokens is not None and stats.tokens_in.value:
+        ratio = est_tokens / stats.tokens_in.value
+        base *= min(max(ratio, 0.25), 8.0)
     # In-flight pressure: at max_concurrency the estimate doubles.
     concurrency_factor = 1.0 + (stats.inflight / cfg.max_concurrency)
     # Queued work ahead of us costs roughly one base latency per queue slot,
@@ -82,9 +98,12 @@ def score_backend(
     workload: WorkloadType,
     slo: SLOClassConfig,
     routing: RoutingConfig,
+    est_tokens: int | None = None,
 ) -> ScoredCandidate:
     w = routing.weights
-    predicted = predict_latency_ms(cfg, stats, routing.default_latency_ms)
+    predicted = predict_latency_ms(
+        cfg, stats, routing.default_latency_ms, est_tokens=est_tokens
+    )
     parts = {
         "latency_fit": latency_fit(predicted, slo),
         "affinity": affinity_for(cfg, workload),
@@ -110,12 +129,13 @@ def rank_candidates(
     workload: WorkloadType,
     slo: SLOClassConfig,
     routing: RoutingConfig,
+    est_tokens: int | None = None,
 ) -> list[ScoredCandidate]:
     """Score eligible backends, best first. Callers pre-filter for capability."""
     scored = [
-        score_backend(cfg, stats, workload, slo, routing)
+        score_backend(cfg, stats, workload, slo, routing, est_tokens=est_tokens)
         for cfg, stats in candidates
-        if stats.healthy and stats.breaker.available()
+        if stats.healthy and not stats.draining and stats.breaker.available()
     ]
     scored.sort(key=lambda c: c.score, reverse=True)
     return scored

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -31,8 +31,13 @@ class BaseAdapter(ABC):
         """Hook for adapters that rewrite the payload (default: passthrough)."""
         return request.payload
 
-    async def infer(self, request: RouteRequest) -> AdapterResponse:
-        resp = await self.client.post(self.target_url(request), json=self.prepare_payload(request))
+    async def infer(
+        self, request: RouteRequest, timeout: float | None = None
+    ) -> AdapterResponse:
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        resp = await self.client.post(
+            self.target_url(request), json=self.prepare_payload(request), **kwargs
+        )
         try:
             body = resp.json()
         except ValueError:

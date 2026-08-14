@@ -46,6 +46,9 @@ class RouteRequest:
     slo_class: str = "default"
     stream: bool = False
     request_id: str = ""
+    session: str = ""  # affinity key for KV/prefix-cache reuse ("" = none)
+    deadline_ms: float | None = None  # total budget incl. failover; None = unbounded
+    est_tokens: int | None = None  # rough input-token estimate for LLM workloads
 
 
 @dataclass(slots=True)

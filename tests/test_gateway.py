@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import httpx
 
 from trident.gateway import create_app

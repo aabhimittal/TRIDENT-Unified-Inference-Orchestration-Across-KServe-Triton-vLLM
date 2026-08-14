@@ -35,7 +35,7 @@ def test_all_unhealthy_raises(base_config):
     router = make_router(base_config)
     for rt in router.registry.backends.values():
         rt.stats.healthy = False
-    with pytest.raises(NoBackendAvailable, match="unhealthy or circuit-broken"):
+    with pytest.raises(NoBackendAvailable, match="unhealthy, draining, or circuit-broken"):
         router.select("llama-3-8b", WorkloadType.LLM_CHAT)
 
 

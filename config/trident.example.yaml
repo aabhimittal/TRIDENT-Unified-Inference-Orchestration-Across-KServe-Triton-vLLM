@@ -9,6 +9,7 @@ slo_classes:
   interactive:            # user-facing chat: tight budget, high priority
     target_p95_ms: 1500
     priority: 10
+    hedge: true           # race a backup request when the primary is slow
   realtime:               # CV pipelines on live streams
     target_p95_ms: 200
     priority: 20
@@ -29,6 +30,34 @@ routing:
   default_latency_ms: 250 # prior before observations exist
   breaker_failure_threshold: 5
   breaker_reset_seconds: 30
+
+  # Priority load shedding: when every capable backend is saturated,
+  # requests below the priority cutoff get a fast 429 + Retry-After
+  # instead of queuing in front of interactive traffic.
+  admission:
+    enabled: true
+    saturation_threshold: 0.9   # saturated = inflight >= 0.9 * max_concurrency
+    shed_below_priority: 5      # batch (priority 1) sheds; interactive (10) rides through
+    retry_after_seconds: 1
+
+  # Tail-latency hedging (opt-in per SLO class via `hedge: true`):
+  # if the primary hasn't answered within delay_factor x its predicted
+  # latency, the runner-up backend races it; first response wins.
+  hedge:
+    enabled: true
+    delay_factor: 1.5
+    min_delay_ms: 50
+    max_delay_ms: 2000
+
+  # Sticky sessions for KV/prefix-cache reuse: requests carrying the same
+  # x-trident-session header keep hitting the same backend while it stays
+  # within min_score_ratio of the best candidate.
+  session_affinity:
+    enabled: true
+    header: x-trident-session
+    ttl_seconds: 300
+    max_sessions: 10000
+    min_score_ratio: 0.5
 
   # Canary: send 10% of llama-3-8b traffic to the TensorRT-LLM build on Triton.
   canary:

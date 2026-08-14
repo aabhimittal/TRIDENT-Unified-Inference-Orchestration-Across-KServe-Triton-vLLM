@@ -20,6 +20,11 @@ class SLOClassConfig(BaseModel):
 
     target_p95_ms: float = Field(gt=0, description="Latency budget for this class")
     priority: int = Field(default=1, ge=0, description="Higher preempts on contention")
+    hedge: bool = Field(
+        default=False,
+        description="Send a backup request to the runner-up backend when the primary "
+        "is slow (requires routing.hedge.enabled)",
+    )
 
 
 class ModelConfig(BaseModel):
@@ -67,7 +72,7 @@ class BackendConfig(BaseModel):
         return v.rstrip("/") if v else v
 
     @model_validator(mode="after")
-    def _default_protocol(self) -> "BackendConfig":
+    def _default_protocol(self) -> BackendConfig:
         if self.protocol is None:
             self.protocol = (
                 Protocol.OPENAI if self.kind == BackendKind.VLLM else Protocol.KSERVE_V2
@@ -108,6 +113,54 @@ class ShadowRule(BaseModel):
     sample: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
+class AdmissionConfig(BaseModel):
+    """Priority load shedding: when every capable backend is saturated,
+    reject low-priority work fast (429) instead of queuing it in front of
+    high-priority traffic."""
+
+    enabled: bool = False
+    saturation_threshold: float = Field(
+        default=0.9, gt=0,
+        description="A backend counts as saturated when inflight >= "
+        "max_concurrency * threshold",
+    )
+    shed_below_priority: int = Field(
+        default=5, ge=0,
+        description="Requests whose SLO priority is below this are shed under saturation",
+    )
+    retry_after_seconds: int = Field(default=1, ge=0)
+
+
+class HedgeConfig(BaseModel):
+    """Tail-latency hedging: if the primary hasn't answered within a delay
+    derived from its own latency profile, race a backup request against it
+    on the runner-up backend and take whichever finishes first."""
+
+    enabled: bool = False
+    delay_factor: float = Field(
+        default=1.5, gt=0,
+        description="Hedge delay = factor * predicted primary latency",
+    )
+    min_delay_ms: float = Field(default=50.0, ge=0)
+    max_delay_ms: float = Field(default=2000.0, gt=0)
+
+
+class SessionAffinityConfig(BaseModel):
+    """Sticky sessions for KV/prefix-cache reuse: requests carrying the same
+    session key keep landing on the same backend while it stays competitive,
+    so vLLM prefix caching and warm KV state actually get hits."""
+
+    enabled: bool = False
+    header: str = "x-trident-session"
+    ttl_seconds: float = Field(default=300.0, gt=0)
+    max_sessions: int = Field(default=10000, gt=0)
+    min_score_ratio: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description="Stickiness holds only while the pinned backend scores at least "
+        "this fraction of the current best candidate",
+    )
+
+
 class RoutingConfig(BaseModel):
     weights: RoutingWeights = RoutingWeights()
     max_attempts: int = Field(default=2, ge=1, description="Failover attempts across backends")
@@ -116,6 +169,9 @@ class RoutingConfig(BaseModel):
     )
     breaker_failure_threshold: int = Field(default=5, ge=1)
     breaker_reset_seconds: float = Field(default=30.0, gt=0)
+    admission: AdmissionConfig = AdmissionConfig()
+    hedge: HedgeConfig = HedgeConfig()
+    session_affinity: SessionAffinityConfig = SessionAffinityConfig()
     canary: list[CanaryRule] = []
     shadow: list[ShadowRule] = []
 
@@ -134,7 +190,7 @@ class TridentConfig(BaseModel):
     backends: list[BackendConfig]
 
     @model_validator(mode="after")
-    def _validate_references(self) -> "TridentConfig":
+    def _validate_references(self) -> TridentConfig:
         names = {b.name for b in self.backends}
         if len(names) != len(self.backends):
             raise ValueError("backend names must be unique")
@@ -151,6 +207,6 @@ class TridentConfig(BaseModel):
 
 
 def load_config(path: str | Path) -> TridentConfig:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     return TridentConfig.model_validate(raw)
